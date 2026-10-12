@@ -704,17 +704,19 @@ export async function PUT(
     // Batch reorder tables
     // ------------------------------------------------------
     if (body.action === 'reorder' && Array.isArray(body.orders)) {
-      for (const item of body.orders) {
-        if (item.id && typeof item.display_order === 'number') {
-          await supabase
+      const updates = body.orders
+        .filter((item: any) => item.id && typeof item.display_order === 'number')
+        .map((item: any) =>
+          supabase
             .from('tables')
             .update({
               display_order: item.display_order,
               updated_at: new Date().toISOString(),
             })
             .eq('id', item.id)
-        }
-      }
+        )
+
+      await Promise.all(updates)
 
       return NextResponse.json({
         success: true,

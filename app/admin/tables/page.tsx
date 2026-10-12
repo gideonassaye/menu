@@ -22,6 +22,7 @@ import {
   ArrowUp,
   ArrowDown,
   Search,
+  GripVertical,
 } from 'lucide-react'
 
 type Table = {
@@ -69,6 +70,8 @@ export default function TablesPage() {
   const [error, setError] = useState('')
   const [successMessage, setSuccessMessage] = useState('')
   const [search, setSearch] = useState('')
+  const [draggedTableId, setDraggedTableId] = useState<string | null>(null)
+  const [dragOverTableId, setDragOverTableId] = useState<string | null>(null)
 
   const tablesRef = useRef<Table[]>([])
   const hasLoadedOnce = useRef(false)
@@ -249,19 +252,11 @@ export default function TablesPage() {
   )
 
   // ---------------------------------------------------------
-  // REORDER TABLES FREELY
+  // REORDER TABLES FREELY & DRAG AND DROP
   // ---------------------------------------------------------
 
-  const handleMoveTable = async (currentIndex: number, direction: 'up' | 'down') => {
-    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
-    if (targetIndex < 0 || targetIndex >= parentTables.length) return
-
-    const newParents = [...parentTables]
-    const [moved] = newParents.splice(currentIndex, 1)
-    newParents.splice(targetIndex, 0, moved)
-
-    // Build batch reorder array
-    const ordersToUpdate = newParents.map((t, idx) => ({
+  const persistReorder = async (reorderedParents: Table[]) => {
+    const ordersToUpdate = reorderedParents.map((t, idx) => ({
       id: t.id,
       display_order: idx + 1,
     }))
@@ -275,7 +270,7 @@ export default function TablesPage() {
     )
 
     try {
-      await fetch('/api/tables', {
+      const res = await fetch('/api/tables', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -283,9 +278,94 @@ export default function TablesPage() {
           orders: ordersToUpdate,
         }),
       })
+      if (!res.ok) {
+        throw new Error('Failed to save table order')
+      }
     } catch (e) {
       console.error('Failed to save table order', e)
+      setError(
+        isAmharic
+          ? 'የጠረጴዛዎችን አቀማመጥ ማስቀመጥ አልተቻለም'
+          : 'Failed to save new table arrangement'
+      )
     }
+  }
+
+  const handleMoveTable = async (currentIndex: number, direction: 'up' | 'down') => {
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+    if (targetIndex < 0 || targetIndex >= parentTables.length) return
+
+    const newParents = [...parentTables]
+    const [moved] = newParents.splice(currentIndex, 1)
+    newParents.splice(targetIndex, 0, moved)
+
+    await persistReorder(newParents)
+  }
+
+  const handleDragStart = (e: React.DragEvent, tableId: string) => {
+    // If clicked inside an interactive button/input, do not initiate card drag
+    const target = e.target as HTMLElement
+    if (target.closest('button') && !target.closest('.drag-handle')) {
+      e.preventDefault()
+      return
+    }
+    setDraggedTableId(tableId)
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', tableId)
+  }
+
+  const handleDragOver = (e: React.DragEvent, tableId: string) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    if (dragOverTableId !== tableId) {
+      setDragOverTableId(tableId)
+    }
+  }
+
+  const handleDragEnter = (e: React.DragEvent, tableId: string) => {
+    e.preventDefault()
+    if (draggedTableId && draggedTableId !== tableId) {
+      setDragOverTableId(tableId)
+    }
+  }
+
+  const handleDragLeave = (e: React.DragEvent, tableId: string) => {
+    const related = e.relatedTarget as Node | null
+    const current = e.currentTarget as Node
+    if (!related || !current.contains(related)) {
+      if (dragOverTableId === tableId) {
+        setDragOverTableId(null)
+      }
+    }
+  }
+
+  const handleDrop = async (e: React.DragEvent, targetTableId: string) => {
+    e.preventDefault()
+    const sourceTableId = draggedTableId || e.dataTransfer.getData('text/plain')
+    setDraggedTableId(null)
+    setDragOverTableId(null)
+
+    if (!sourceTableId || sourceTableId === targetTableId) return
+
+    const currentIndex = parentTables.findIndex((t) => t.id === sourceTableId)
+    const targetIndex = parentTables.findIndex((t) => t.id === targetTableId)
+    if (currentIndex === -1 || targetIndex === -1) return
+
+    const newParents = [...parentTables]
+    const [moved] = newParents.splice(currentIndex, 1)
+    newParents.splice(targetIndex, 0, moved)
+
+    await persistReorder(newParents)
+    setSuccessMessage(
+      isAmharic
+        ? `ጠረጴዛ ${moved.table_number} አቀማመጥ ተቀይሯል`
+        : `Table ${moved.table_number} moved successfully`
+    )
+  }
+
+  const handleDragEnd = () => {
+    setDraggedTableId(null)
+    setDragOverTableId(null)
   }
 
   // ---------------------------------------------------------
@@ -708,18 +788,30 @@ export default function TablesPage() {
 
         {/* CONTROLS & SEARCH */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-cream-200 dark:border-slate-800 shadow-sm">
-          <div className="relative w-full sm:w-80">
-            <Search
-              size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-            />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={isAmharic ? 'ጠረጴዛ ቁጥር ወይም ስም ፈልግ...' : 'Search table number or name...'}
-              className="w-full rounded-lg border border-cream-200 dark:border-slate-800 bg-cream-50/50 dark:bg-slate-800/50 pl-9 pr-4 py-1.5 text-xs outline-none focus:border-restaurant-accent transition"
-            />
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full sm:w-auto">
+            <div className="relative w-full sm:w-80">
+              <Search
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+              />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={isAmharic ? 'ጠረጴዛ ቁጥር ወይም ስም ፈልግ...' : 'Search table number or name...'}
+                className="w-full rounded-lg border border-cream-200 dark:border-slate-800 bg-cream-50/50 dark:bg-slate-800/50 pl-9 pr-4 py-1.5 text-xs outline-none focus:border-restaurant-accent transition"
+              />
+            </div>
+            {search.trim() ? (
+              <span className="text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-lg border border-amber-200 dark:border-amber-900/40 flex items-center gap-1">
+                <span>{isAmharic ? 'ድራግ ለማድረግ ፍለጋውን ያጽዱ' : 'Clear search to drag & drop rearrange'}</span>
+              </span>
+            ) : (
+              <span className="hidden md:inline-flex items-center gap-1.5 text-[11px] font-medium text-restaurant-text/80 dark:text-gray-300 bg-cream-100/70 dark:bg-slate-800/80 px-2.5 py-1 rounded-lg border border-cream-200 dark:border-slate-700">
+                <GripVertical size={13} className="text-restaurant-accent" />
+                <span>{isAmharic ? 'ጠረጴዛዎችን ለመደርደር ይጎትቱ' : 'Drag & drop tables to rearrange'}</span>
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
@@ -775,20 +867,43 @@ export default function TablesPage() {
               const children = getChildSections(table.id)
               const isSplit = children.length > 0
               const activeOrder = getActiveOrderForTable(table.id)
+              const isBeingDragged = draggedTableId === table.id
+              const isDropTarget = dragOverTableId === table.id && !isBeingDragged
 
               return (
                 <div
                   key={table.id}
-                  className={`relative flex flex-col justify-between rounded-xl border bg-white p-4 shadow-sm transition dark:bg-slate-900 ${
-                    !table.active
+                  draggable={!search.trim()}
+                  onDragStart={(e) => handleDragStart(e, table.id)}
+                  onDragOver={(e) => handleDragOver(e, table.id)}
+                  onDragEnter={(e) => handleDragEnter(e, table.id)}
+                  onDragLeave={(e) => handleDragLeave(e, table.id)}
+                  onDrop={(e) => handleDrop(e, table.id)}
+                  onDragEnd={handleDragEnd}
+                  className={`group relative flex flex-col justify-between rounded-xl border bg-white p-4 shadow-sm transition-all duration-150 dark:bg-slate-900 ${
+                    isBeingDragged
+                      ? 'opacity-30 scale-[0.98] border-dashed border-2 border-restaurant-accent ring-2 ring-restaurant-accent/20 bg-restaurant-accent/5 cursor-grabbing'
+                      : isDropTarget
+                      ? 'ring-2 ring-restaurant-accent border-restaurant-accent scale-[1.02] bg-restaurant-accent/5 dark:bg-restaurant-accent/10 shadow-lg z-10'
+                      : !table.active
                       ? 'opacity-60 border-gray-200 dark:border-slate-800'
                       : activeOrder
                         ? 'border-emerald-300 dark:border-emerald-800/60 ring-1 ring-emerald-400/20'
                         : isSplit
                           ? 'border-blue-200 dark:border-blue-900/40'
-                          : 'border-cream-200 dark:border-slate-800 hover:border-restaurant-accent'
+                          : 'border-cream-200 dark:border-slate-800 hover:border-restaurant-accent hover:shadow-md'
                   }`}
                 >
+                  {/* DROP TARGET OVERLAY BADGE */}
+                  {isDropTarget && (
+                    <div className="absolute inset-0 z-20 pointer-events-none rounded-xl border-2 border-dashed border-restaurant-accent bg-restaurant-accent/10 backdrop-blur-[0.5px] flex items-center justify-center">
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-restaurant-accent text-white text-xs font-bold shadow-md animate-pulse">
+                        <GripVertical size={13} />
+                        {isAmharic ? 'እዚህ አስቀምጥ' : 'Drop Here'}
+                      </span>
+                    </div>
+                  )}
+
                   <div>
                     {/* TOP ROW: TABLE NUMBER, CAPACITY, ACTIVE ORDER */}
                     <div className="flex items-start justify-between gap-2">
@@ -825,6 +940,14 @@ export default function TablesPage() {
 
                       {/* REORDER, EDIT, DELETE & POWER MENU */}
                       <div className="flex items-center gap-1">
+                        {/* Drag Handle */}
+                        <div
+                          className="drag-handle flex items-center justify-center p-1.5 rounded-lg text-gray-400 hover:text-restaurant-accent hover:bg-restaurant-accent/10 dark:hover:bg-restaurant-accent/20 cursor-grab active:cursor-grabbing transition"
+                          title={isAmharic ? 'ጠረጴዛውን ለመደርደር ይጎትቱ' : 'Drag to reorder table'}
+                        >
+                          <GripVertical size={16} />
+                        </div>
+
                         {/* Move Up / Down Buttons */}
                         <div className="flex items-center rounded-lg bg-gray-100 dark:bg-slate-800 p-0.5 mr-1">
                           <button
