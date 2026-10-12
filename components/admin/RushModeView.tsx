@@ -20,6 +20,8 @@ import {
   ChefHat,
   ArrowRight,
   Sparkles,
+  PlusCircle,
+  MessageSquare,
 } from 'lucide-react';
 import { useAdminLanguage } from '@/lib/i18n/AdminLanguageContext';
 import { compressReceiptImage } from '@/lib/utils/image';
@@ -41,6 +43,7 @@ export type RushOrderItem = {
   subtotal?: number;
   notes?: string | null;
   status?: string;
+  isNew?: boolean;
 };
 
 export type RushOrder = {
@@ -158,6 +161,11 @@ export function RushModeView({
   const [isEditingOrder, setIsEditingOrder] = useState(false);
   const [editItems, setEditItems] = useState<RushOrderItem[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [showInlineAddPicker, setShowInlineAddPicker] = useState(false);
+  const [editItemSearch, setEditItemSearch] = useState('');
+  const [editItemCategory, setEditItemCategory] = useState<string>('all');
+  const [justAddedFeedback, setJustAddedFeedback] = useState<string | null>(null);
+  const [editingNoteIndex, setEditingNoteIndex] = useState<number | null>(null);
 
   // Processing state for dynamic progression button
   const [processingOrderId, setProcessingOrderId] = useState<string | null>(null);
@@ -198,21 +206,43 @@ export function RushModeView({
   // Reset cart / edit state when selected table changes
   const activeOrderForSelectedTable = selectedTableId ? activeOrdersByTable.get(selectedTableId) : null;
 
+  // Track table ID changes to avoid discarding active edit sessions
+  const prevTableIdRef = React.useRef(selectedTableId);
   useEffect(() => {
-    setDraftCart([]);
-    setDraftNotes('');
-    setIsEditingOrder(false);
-    if (activeOrderForSelectedTable && activeOrderForSelectedTable.items) {
-      setEditItems(
-        activeOrderForSelectedTable.items.map((it) => ({
-          ...it,
-          quantity: it.quantity || 1,
-        }))
-      );
-    } else {
-      setEditItems([]);
+    const tableChanged = prevTableIdRef.current !== selectedTableId;
+    if (tableChanged) {
+      prevTableIdRef.current = selectedTableId;
+      setDraftCart([]);
+      setDraftNotes('');
+      setIsEditingOrder(false);
+      setShowInlineAddPicker(false);
+      setJustAddedFeedback(null);
+      setEditingNoteIndex(null);
+      if (activeOrderForSelectedTable && activeOrderForSelectedTable.items) {
+        setEditItems(
+          activeOrderForSelectedTable.items.map((it) => ({
+            ...it,
+            quantity: it.quantity || 1,
+            isNew: false,
+          }))
+        );
+      } else {
+        setEditItems([]);
+      }
+    } else if (!isEditingOrder) {
+      if (activeOrderForSelectedTable && activeOrderForSelectedTable.items) {
+        setEditItems(
+          activeOrderForSelectedTable.items.map((it) => ({
+            ...it,
+            quantity: it.quantity || 1,
+            isNew: false,
+          }))
+        );
+      } else {
+        setEditItems([]);
+      }
     }
-  }, [selectedTableId, activeOrderForSelectedTable]);
+  }, [selectedTableId, activeOrderForSelectedTable, isEditingOrder]);
 
   // Filtered tables
   const filteredTables = useMemo(() => {
@@ -275,17 +305,65 @@ export function RushModeView({
     );
   };
 
+  // Filtered menu items for inline add picker inside order edit panel
+  const availableItemsForInlinePicker = useMemo(() => {
+    return menuItems.filter((item) => {
+      if (!item.available) return false;
+      if (editItemCategory !== 'all' && item.categoryId !== editItemCategory) return false;
+      if (editItemSearch.trim()) {
+        const q = editItemSearch.toLowerCase();
+        const en = item.name.en?.toLowerCase() || '';
+        const am = item.name.am?.toLowerCase() || '';
+        return en.includes(q) || am.includes(q);
+      }
+      return true;
+    });
+  }, [menuItems, editItemCategory, editItemSearch]);
+
   // Handlers for Edit Order (active order)
+  const startEditingOrder = () => {
+    if (!activeOrderForSelectedTable) return;
+    setEditItems(
+      (activeOrderForSelectedTable.items || []).map((it) => ({
+        ...it,
+        quantity: it.quantity || 1,
+        isNew: false,
+      }))
+    );
+    setIsEditingOrder(true);
+    setShowInlineAddPicker(false);
+    setJustAddedFeedback(null);
+  };
+
+  const handleCancelEdit = () => {
+    if (activeOrderForSelectedTable && activeOrderForSelectedTable.items) {
+      setEditItems(
+        activeOrderForSelectedTable.items.map((it) => ({
+          ...it,
+          quantity: it.quantity || 1,
+          isNew: false,
+        }))
+      );
+    } else {
+      setEditItems([]);
+    }
+    setIsEditingOrder(false);
+    setShowInlineAddPicker(false);
+    setJustAddedFeedback(null);
+    setEditingNoteIndex(null);
+  };
+
   const addItemToActiveOrderEdit = (menuItem: RushMenuItem) => {
     if (!activeOrderForSelectedTable) return;
     setEditItems((prev) => {
       const existingIdx = prev.findIndex((i) => i.menu_item_id === menuItem.id);
       if (existingIdx >= 0) {
         const copy = [...prev];
+        const nextQty = copy[existingIdx].quantity + 1;
         copy[existingIdx] = {
           ...copy[existingIdx],
-          quantity: copy[existingIdx].quantity + 1,
-          subtotal: (copy[existingIdx].unit_price || menuItem.price) * (copy[existingIdx].quantity + 1),
+          quantity: nextQty,
+          subtotal: (copy[existingIdx].unit_price || menuItem.price) * nextQty,
         };
         return copy;
       }
@@ -299,9 +377,15 @@ export function RushModeView({
           subtotal: menuItem.price,
           notes: null,
           status: 'pending',
+          isNew: true,
         },
       ];
     });
+
+    const localized = getLocalizedName(menuItem.name);
+    setJustAddedFeedback(
+      isAmharic ? `"${localized}" ወደ ትዕዛዙ ተጨምሯል` : `Added "${localized}" to active order`
+    );
   };
 
   const updateEditItemQty = (index: number, delta: number) => {
@@ -317,6 +401,17 @@ export function RushModeView({
         ...copy[index],
         quantity: newQty,
         subtotal: uPrice * newQty,
+      };
+      return copy;
+    });
+  };
+
+  const updateEditItemNotes = (index: number, notes: string) => {
+    setEditItems((prev) => {
+      const copy = [...prev];
+      copy[index] = {
+        ...copy[index],
+        notes: notes || null,
       };
       return copy;
     });
@@ -397,6 +492,9 @@ export function RushModeView({
       }
 
       setIsEditingOrder(false);
+      setShowInlineAddPicker(false);
+      setJustAddedFeedback(null);
+      setEditingNoteIndex(null);
       await onRefresh();
     } catch (err: any) {
       alert(err.message || 'Error updating order');
@@ -778,7 +876,13 @@ export function RushModeView({
 
                   {activeOrderForSelectedTable && (
                     <button
-                      onClick={() => setIsEditingOrder(!isEditingOrder)}
+                      onClick={() => {
+                        if (isEditingOrder) {
+                          handleCancelEdit();
+                        } else {
+                          startEditingOrder();
+                        }
+                      }}
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border ${
                         isEditingOrder
                           ? 'bg-amber-500 text-slate-950 border-amber-400'
@@ -805,71 +909,263 @@ export function RushModeView({
 
                     {/* ORDER EDITING OR VIEWING ITEMS */}
                     {isEditingOrder ? (
-                      <div className="p-4 rounded-xl bg-slate-900/90 border border-amber-500/40 flex flex-col gap-3">
-                        <div className="flex items-center justify-between">
+                      <div className="p-4 rounded-xl bg-slate-900/90 border border-amber-500/40 flex flex-col gap-3 shadow-lg">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
                           <span className="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1">
                             <Pencil className="w-3.5 h-3.5" />
                             {isAmharic ? 'ትዕዛዝ በማሻሻል ላይ...' : 'Modifying Order Items...'}
                           </span>
-                          <span className="text-xs text-slate-400">
-                            {isAmharic ? 'ከስር ካታሎግ ምግብ ማከል ይችላሉ' : 'Click items in catalog to append'}
-                          </span>
+                          <button
+                            onClick={() => setShowInlineAddPicker(!showInlineAddPicker)}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-xs font-bold flex items-center gap-1 transition-all"
+                          >
+                            <PlusCircle className="w-3.5 h-3.5" />
+                            <span>
+                              {showInlineAddPicker
+                                ? isAmharic ? 'መራጭ ዝጋ' : 'Close Picker'
+                                : isAmharic ? '+ አዲስ ምግብ ጨምር' : '+ Add Item'}
+                            </span>
+                          </button>
                         </div>
 
-                        <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
+                        {/* JUST ADDED FEEDBACK ALERT */}
+                        {justAddedFeedback && (
+                          <div className="p-2.5 rounded-xl bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-xs flex items-center justify-between animate-pulse">
+                            <div className="flex items-center gap-1.5 font-medium">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                              <span>{justAddedFeedback}</span>
+                            </div>
+                            <button
+                              onClick={() => setJustAddedFeedback(null)}
+                              className="text-emerald-400 hover:text-white p-0.5"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+
+                        {/* INLINE QUICK ITEM ADDER */}
+                        {showInlineAddPicker && (
+                          <div className="p-3 rounded-xl bg-slate-950/90 border border-emerald-500/40 flex flex-col gap-2.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                                <PlusCircle className="w-4 h-4" />
+                                {isAmharic ? 'ወደዚህ ትዕዛዝ አዲስ ምግብ ይምረጡ' : 'Select Item to Add to Active Order'}
+                              </span>
+                              <button
+                                onClick={() => setShowInlineAddPicker(false)}
+                                className="text-slate-400 hover:text-white p-0.5"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+
+                            <div className="relative">
+                              <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                              <input
+                                type="text"
+                                placeholder={isAmharic ? 'በስም ፈልግ...' : 'Search items to add...'}
+                                value={editItemSearch}
+                                onChange={(e) => setEditItemSearch(e.target.value)}
+                                className="w-full text-xs pl-8 pr-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-400"
+                              />
+                            </div>
+
+                            <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px] custom-scrollbar">
+                              <button
+                                onClick={() => setEditItemCategory('all')}
+                                className={`px-2 py-0.5 rounded-md font-medium whitespace-nowrap transition-all ${
+                                  editItemCategory === 'all'
+                                    ? 'bg-emerald-500 text-slate-950 font-bold'
+                                    : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
+                                }`}
+                              >
+                                {isAmharic ? 'ሁሉም' : 'All'}
+                              </button>
+                              {categories.map((cat) => (
+                                <button
+                                  key={cat.id}
+                                  onClick={() => setEditItemCategory(cat.id)}
+                                  className={`px-2 py-0.5 rounded-md font-medium whitespace-nowrap transition-all ${
+                                    editItemCategory === cat.id
+                                      ? 'bg-emerald-500 text-slate-950 font-bold'
+                                      : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
+                                  }`}
+                                >
+                                  {getLocalizedName(cat.name)}
+                                </button>
+                              ))}
+                            </div>
+
+                            <div className="max-h-44 overflow-y-auto pr-1 flex flex-col gap-1.5 custom-scrollbar">
+                              {availableItemsForInlinePicker.length > 0 ? (
+                                availableItemsForInlinePicker.map((item) => {
+                                  const inList = editItems.find((i) => i.menu_item_id === item.id);
+                                  return (
+                                    <div
+                                      key={item.id}
+                                      className="flex items-center justify-between p-2 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs"
+                                    >
+                                      <div className="flex-1 pr-2 min-w-0">
+                                        <div className="font-semibold text-white truncate">
+                                          {getLocalizedName(item.name)}
+                                        </div>
+                                        <div className="text-[11px] text-emerald-400 font-mono">
+                                          {item.price} ETB
+                                          {inList && (
+                                            <span className="ml-2 text-slate-400 font-sans">
+                                              ({inList.quantity} {isAmharic ? 'በትዕዛዙ ውስጥ' : 'in order'})
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                      <button
+                                        onClick={() => addItemToActiveOrderEdit(item)}
+                                        className="px-2.5 py-1 rounded-md bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs flex items-center gap-1 shadow shrink-0"
+                                      >
+                                        <Plus className="w-3.5 h-3.5" />
+                                        <span>{isAmharic ? 'ጨምር' : 'Add'}</span>
+                                      </button>
+                                    </div>
+                                  );
+                                })
+                              ) : (
+                                <div className="text-center py-4 text-xs text-slate-500 italic">
+                                  {isAmharic ? 'ምንም ምግብ አልተገኘም' : 'No matching items found'}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* EDIT ITEMS LIST */}
+                        <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1 custom-scrollbar">
                           {editItems.map((item, idx) => (
                             <div
                               key={idx}
-                              className="flex items-center justify-between p-2.5 rounded-lg bg-slate-800 border border-slate-700 text-xs"
+                              className={`flex flex-col p-2.5 rounded-lg border text-xs transition-all ${
+                                item.isNew
+                                  ? 'bg-emerald-950/25 border-emerald-500/40'
+                                  : 'bg-slate-800 border-slate-700'
+                              }`}
                             >
-                              <div className="flex-1 pr-2">
-                                <div className="font-semibold text-white">
-                                  {getLocalizedName(item.item_name)}
+                              <div className="flex items-center justify-between">
+                                <div className="flex-1 pr-2">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-semibold text-white">
+                                      {getLocalizedName(item.item_name)}
+                                    </span>
+                                    {item.isNew && (
+                                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                                        {isAmharic ? 'አዲስ' : 'NEW'}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-slate-400 font-mono text-[11px] mt-0.5">
+                                    {item.unit_price} ETB x {item.quantity} = {item.subtotal || (item.unit_price || 0) * item.quantity} ETB
+                                  </div>
                                 </div>
-                                <div className="text-slate-400 font-mono">
-                                  {item.unit_price} ETB x {item.quantity} = {item.subtotal || (item.unit_price || 0) * item.quantity} ETB
+
+                                <div className="flex items-center gap-1.5">
+                                  <div className="flex items-center border border-slate-600 rounded-lg overflow-hidden bg-slate-900">
+                                    <button
+                                      onClick={() => updateEditItemQty(idx, -1)}
+                                      className="p-1 hover:bg-slate-700 text-slate-300"
+                                      title="Decrease"
+                                    >
+                                      <Minus className="w-3.5 h-3.5" />
+                                    </button>
+                                    <span className="px-2 font-bold text-white min-w-[20px] text-center">
+                                      {item.quantity}
+                                    </span>
+                                    <button
+                                      onClick={() => updateEditItemQty(idx, 1)}
+                                      className="p-1 hover:bg-slate-700 text-slate-300"
+                                      title="Increase"
+                                    >
+                                      <Plus className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+
+                                  <button
+                                    onClick={() => setEditingNoteIndex(editingNoteIndex === idx ? null : idx)}
+                                    className={`p-1.5 rounded-lg transition-colors ${
+                                      item.notes
+                                        ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'
+                                        : 'bg-slate-700 text-slate-400 hover:text-slate-200'
+                                    }`}
+                                    title={isAmharic ? 'ማስታወሻ' : 'Notes'}
+                                  >
+                                    <MessageSquare className="w-3.5 h-3.5" />
+                                  </button>
+
+                                  <button
+                                    onClick={() => removeEditItem(idx)}
+                                    className="p-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20"
+                                    title="Remove"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-2">
-                                <div className="flex items-center border border-slate-600 rounded-lg overflow-hidden bg-slate-900">
-                                  <button
-                                    onClick={() => updateEditItemQty(idx, -1)}
-                                    className="p-1 hover:bg-slate-700 text-slate-300"
-                                  >
-                                    <Minus className="w-3.5 h-3.5" />
-                                  </button>
-                                  <span className="px-2 font-bold text-white">{item.quantity}</span>
-                                  <button
-                                    onClick={() => updateEditItemQty(idx, 1)}
-                                    className="p-1 hover:bg-slate-700 text-slate-300"
-                                  >
-                                    <Plus className="w-3.5 h-3.5" />
-                                  </button>
+                              {/* Item Note Field */}
+                              {(editingNoteIndex === idx || item.notes) && (
+                                <div className="mt-2 pt-2 border-t border-slate-700/60 flex items-center gap-2">
+                                  <input
+                                    type="text"
+                                    placeholder={isAmharic ? 'ልዩ ማስታወሻ (ምሳሌ፡ ቅመም ሳይበዛበት)...' : 'Item note (e.g. no onions, extra sauce)...'}
+                                    value={item.notes || ''}
+                                    onChange={(e) => updateEditItemNotes(idx, e.target.value)}
+                                    className="flex-1 text-[11px] px-2 py-1 rounded bg-slate-900 border border-slate-700 text-amber-300 placeholder-slate-500 focus:outline-none focus:border-amber-400"
+                                  />
+                                  {editingNoteIndex === idx && (
+                                    <button
+                                      onClick={() => setEditingNoteIndex(null)}
+                                      className="px-2 py-1 text-[10px] rounded bg-slate-700 text-slate-300 hover:bg-slate-600"
+                                    >
+                                      {isAmharic ? 'እሺ' : 'Done'}
+                                    </button>
+                                  )}
                                 </div>
-                                <button
-                                  onClick={() => removeEditItem(idx)}
-                                  className="p-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
+                              )}
                             </div>
                           ))}
                         </div>
 
+                        {/* BOTTOM ACTIONS */}
                         <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-                          <span className="text-sm font-bold text-white">
-                            Total: {editItems.reduce((acc, curr) => acc + (curr.subtotal || (curr.unit_price || 0) * curr.quantity), 0)} ETB
-                          </span>
-                          <button
-                            onClick={handleSaveModifiedOrder}
-                            disabled={savingEdit}
-                            className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 font-bold text-slate-950 text-xs shadow-md flex items-center gap-1.5"
-                          >
-                            {savingEdit ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                            <span>{isAmharic ? 'ለውጦችን አቀምጥ' : 'Save Order Changes'}</span>
-                          </button>
+                          <div>
+                            <div className="text-xs text-slate-400">
+                              {editItems.length} {isAmharic ? 'ምግቦች' : 'items'}
+                              {editItems.filter((i) => i.isNew).length > 0 && (
+                                <span className="text-emerald-400 font-bold ml-1">
+                                  (+{editItems.filter((i) => i.isNew).length} {isAmharic ? 'አዲስ' : 'new'})
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-sm font-bold text-white font-mono">
+                              Total: {editItems.reduce((acc, curr) => acc + (curr.subtotal || (curr.unit_price || 0) * curr.quantity), 0)} ETB
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={handleCancelEdit}
+                              disabled={savingEdit}
+                              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition-all"
+                            >
+                              {isAmharic ? 'ይቅር' : 'Cancel'}
+                            </button>
+                            <button
+                              onClick={handleSaveModifiedOrder}
+                              disabled={savingEdit}
+                              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 font-bold text-slate-950 text-xs shadow-md flex items-center gap-1.5 transition-all"
+                            >
+                              {savingEdit ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                              <span>{isAmharic ? 'ለውጦችን አቀምጥ' : 'Save Changes'}</span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ) : (
@@ -1007,6 +1303,25 @@ export function RushModeView({
         {/* RIGHT / BOTTOM: FAST SEARCHABLE MENU CATALOG */}
         <div className="lg:col-span-6 xl:col-span-7 flex flex-col gap-4">
           <div className="p-5 rounded-2xl bg-slate-800/90 border border-slate-700 shadow-xl backdrop-blur-md flex flex-col gap-4">
+            {/* EDIT MODE PROMINENT BANNER */}
+            {isEditingOrder && activeOrderForSelectedTable && (
+              <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-inner">
+                <div className="flex items-center gap-2 text-xs text-amber-200">
+                  <Pencil className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
+                  <span>
+                    {isAmharic
+                      ? `የጠረጴዛ #${selectedTable?.table_number || ''} (ትዕዛዝ #${activeOrderForSelectedTable.order_number}) በማስተካከል ላይ: ከስር የሚፈልጉትን ምግብ በመጫን በቀጥታ ይጨምሩ!`
+                      : `Modifying Table #${selectedTable?.table_number || ''} (Order #${activeOrderForSelectedTable.order_number}): Click any item below to append it to this order!`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold text-[10px] uppercase tracking-wider shrink-0">
+                    {isAmharic ? 'አርትኦት በርቷል' : 'Edit Mode Active'}
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-amber-400" />
@@ -1068,7 +1383,11 @@ export function RushModeView({
                         addToDraftCart(item);
                       }
                     }}
-                    className="group flex flex-col justify-between p-3 rounded-xl bg-slate-900/90 border border-slate-700 hover:border-amber-400/60 hover:bg-slate-800 transition-all cursor-pointer shadow-md active:scale-98"
+                    className={`group flex flex-col justify-between p-3 rounded-xl transition-all cursor-pointer shadow-md active:scale-98 ${
+                      isEditingOrder
+                        ? 'bg-slate-900/90 border border-amber-500/40 hover:border-amber-400 hover:bg-slate-800 ring-1 ring-amber-500/20'
+                        : 'bg-slate-900/90 border border-slate-700 hover:border-amber-400/60 hover:bg-slate-800'
+                    }`}
                   >
                     <div>
                       <div className="font-bold text-sm text-slate-100 group-hover:text-amber-300 transition-colors line-clamp-1">
@@ -1085,9 +1404,22 @@ export function RushModeView({
                       <span className="text-xs font-bold text-amber-400 font-mono">
                         {item.price} ETB
                       </span>
-                      <button className="p-1 rounded-lg bg-amber-500/20 text-amber-300 group-hover:bg-amber-500 group-hover:text-slate-950 transition-all">
-                        <Plus className="w-4 h-4" />
-                      </button>
+                      {isEditingOrder ? (
+                        <button
+                          type="button"
+                          className="px-2 py-0.5 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1 group-hover:bg-amber-400 transition-all shadow"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>{isAmharic ? 'ጨምር' : '+ Add'}</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="p-1 rounded-lg bg-amber-500/20 text-amber-300 group-hover:bg-amber-500 group-hover:text-slate-950 transition-all"
+                        >
+                          <Plus className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
