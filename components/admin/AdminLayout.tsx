@@ -35,6 +35,7 @@ import {
   Check,
   Phone,
   Calendar,
+  Cake,
 } from 'lucide-react';
 import { getAdminAccessToken, getAdminAuth, normalizeAdminRole, signOutAdmin } from '@/lib/admin-auth';
 import { supabase } from '@/lib/supabase';
@@ -240,6 +241,140 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
     }
   };
 
+  // Sidebar Notification Badges State
+  const [counts, setCounts] = useState<{
+    cashier: number;
+    kitchen: number;
+    drinksKitchen: number;
+    cakeOrders: number;
+    takenMaterials: number;
+    inventory: number;
+  }>({
+    cashier: 0,
+    kitchen: 0,
+    drinksKitchen: 0,
+    cakeOrders: 0,
+    takenMaterials: 0,
+    inventory: 0,
+  });
+
+  // Cake Orders Delivery Reminder Alert State
+  const [dueCakeOrders, setDueCakeOrders] = useState<any[]>([]);
+  const [showCakeOrdersModal, setShowCakeOrdersModal] = useState(false);
+
+  useEffect(() => {
+    const fetchOrderCounts = async () => {
+      try {
+        const res = await fetch('/api/orders', { cache: 'no-store' });
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && Array.isArray(json.data)) {
+            const activeOrders = json.data.filter((o: any) =>
+              ['pending', 'confirmed', 'preparing', 'ready', 'served', 'payment_pending'].includes(o.status)
+            );
+
+            const cashierOrders = activeOrders.filter((o: any) =>
+              ['pending', 'confirmed', 'ready', 'payment_pending'].includes(o.status)
+            );
+
+            let foodCount = 0;
+            let drinkCount = 0;
+
+            for (const order of activeOrders) {
+              if (['confirmed', 'preparing', 'pending'].includes(order.status)) {
+                for (const item of (order.items || [])) {
+                  if (['pending', 'confirmed', 'preparing'].includes(item.status)) {
+                    const type = String(item.category_type || '').toLowerCase();
+                    if (type === 'drink' || type === 'drinks') {
+                      drinkCount += item.quantity || 1;
+                    } else {
+                      foodCount += item.quantity || 1;
+                    }
+                  }
+                }
+              }
+            }
+
+            setCounts((prev) => ({
+              ...prev,
+              cashier: cashierOrders.length,
+              kitchen: foodCount,
+              drinksKitchen: drinkCount,
+            }));
+          }
+        }
+      } catch (e) {}
+    };
+
+    const fetchCakeOrders = async () => {
+      try {
+        const res = await fetch('/api/cake-orders', { cache: 'no-store' });
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && Array.isArray(json.data)) {
+            const activeCakes = json.data.filter((c: any) =>
+              ['pending', 'preparing', 'ready'].includes(c.status)
+            );
+
+            const todayStr = new Date().toDateString();
+            const now = new Date();
+            const dueOrOverdue = json.data.filter((c: any) => {
+              if (['completed', 'cancelled'].includes(c.status)) return false;
+              const deliv = new Date(c.delivery_date);
+              return deliv.toDateString() === todayStr || deliv < now;
+            });
+
+            setCounts((prev) => ({
+              ...prev,
+              cakeOrders: activeCakes.length,
+            }));
+
+            if (dueOrOverdue.length > 0) {
+              setDueCakeOrders(dueOrOverdue);
+              const isDismissed = sessionStorage.getItem('dismissed_cake_orders_popup');
+              if (!isDismissed) {
+                setShowCakeOrdersModal(true);
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    };
+
+    fetchOrderCounts();
+    fetchCakeOrders();
+
+    const channel = supabase
+      .channel(`admin-layout-badges-${Date.now()}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, fetchOrderCounts)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, fetchOrderCounts)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cake_orders' }, fetchCakeOrders)
+      .subscribe();
+
+    const interval = setInterval(() => {
+      fetchOrderCounts();
+      fetchCakeOrders();
+    }, 45000);
+
+    return () => {
+      clearInterval(interval);
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  useEffect(() => {
+    setCounts((prev) => ({
+      ...prev,
+      takenMaterials: unreturnedItems.length,
+      inventory: unreadAlerts,
+    }));
+  }, [unreturnedItems.length, unreadAlerts]);
+
+  const handleDismissCakeOrdersModal = () => {
+    sessionStorage.setItem('dismissed_cake_orders_popup', 'true');
+    setShowCakeOrdersModal(false);
+  };
+
   useEffect(() => {
     const checkAuth = async () => {
       try {
@@ -304,6 +439,7 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
       label: language === 'am' ? 'ገንዘብ ተቀባይ' : 'Cashier',
       icon: ClipboardList,
       href: '/admin/orders',
+      badgeCount: counts.cashier,
     },
     {
       label: t.menuReport,
@@ -319,11 +455,13 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
       label: t.kitchen,
       icon: ChefHat,
       href: '/admin/kitchen',
+      badgeCount: counts.kitchen,
     },
     {
       label: t.drinksKitchen,
       icon: Coffee,
       href: '/admin/drinks-kitchen',
+      badgeCount: counts.drinksKitchen,
     },
     {
       label: language === 'am' ? 'ትዕዛዝ መውሰጃ' : 'Take Order',
@@ -339,6 +477,7 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
       label: t.inventory,
       icon: Package,
       href: '/admin/inventory',
+      badgeCount: counts.inventory,
     },
     {
       label: language === 'am' ? 'የካፌ ቁሳቁሶች' : 'Cafe Materials',
@@ -349,6 +488,13 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
       label: language === 'am' ? 'የተወሰዱ እቃዎች' : 'Taken Materials',
       icon: PackageMinus,
       href: '/admin/taken-materials',
+      badgeCount: counts.takenMaterials,
+    },
+    {
+      label: language === 'am' ? 'የኬክ ትዕዛዞች' : 'Cake Orders',
+      icon: Cake,
+      href: '/admin/cake-orders',
+      badgeCount: counts.cakeOrders,
     },
     {
       label: language === 'am' ? 'ምግቦች' : 'Menu Items',
@@ -386,22 +532,32 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
         '/admin/daily-expenses',
         '/admin/activity-log',
         '/admin/taken-materials',
+        '/admin/cake-orders',
       ].includes(item.href);
     }
 
     if (role === 'kitchen') {
-      return item.href === '/admin/kitchen' || item.href === '/admin/inventory' || item.href === '/admin/taken-materials';
+      return (
+        item.href === '/admin/kitchen' ||
+        item.href === '/admin/inventory' ||
+        item.href === '/admin/taken-materials' ||
+        item.href === '/admin/cake-orders'
+      );
     }
 
     if (role === 'drinks_kitchen') {
-      return item.href === '/admin/drinks-kitchen' || item.href === '/admin/inventory' || item.href === '/admin/taken-materials';
+      return (
+        item.href === '/admin/drinks-kitchen' ||
+        item.href === '/admin/inventory' ||
+        item.href === '/admin/taken-materials'
+      );
     }
 
     if (role === 'waiter') {
       return item.href === '/waiter' || item.href === '/admin/taken-materials';
     }
 
-    return item.href === '/admin' || item.href === '/admin/taken-materials';
+    return item.href === '/admin' || item.href === '/admin/taken-materials' || item.href === '/admin/cake-orders';
   });
 
   const visibleNavItems =
@@ -422,11 +578,25 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
     }
 
     if (role === 'cashier' || role === 'order_manager') {
-      return ['/admin/orders', '/admin/reports/orders', '/admin/tables', '/order', '/admin/daily-expenses', '/admin/activity-log', '/admin/taken-materials'];
+      return [
+        '/admin/orders',
+        '/admin/reports/orders',
+        '/admin/tables',
+        '/order',
+        '/admin/daily-expenses',
+        '/admin/activity-log',
+        '/admin/taken-materials',
+        '/admin/cake-orders',
+      ];
     }
 
     if (role === 'kitchen') {
-      return ['/admin/kitchen', '/admin/inventory', '/admin/taken-materials'];
+      return [
+        '/admin/kitchen',
+        '/admin/inventory',
+        '/admin/taken-materials',
+        '/admin/cake-orders',
+      ];
     }
 
     if (role === 'drinks_kitchen') {
@@ -437,7 +607,7 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
       return ['/waiter', '/order', '/admin/taken-materials'];
     }
 
-    return ['/admin', '/admin/taken-materials'];
+    return ['/admin', '/admin/taken-materials', '/admin/cake-orders'];
   })();
 
   if (allowedPaths && !allowedPaths.some((path) => pathname === path || pathname.startsWith(`${path}/`))) {
@@ -485,19 +655,38 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
               pathname === item.href ||
               (item.href !== '/admin' && pathname.startsWith(`${item.href}/`));
 
+            const badgeCount = (item as any).badgeCount;
+
             return (
               <Link
                 key={item.href}
                 href={item.href}
                 onClick={() => setIsOpen(false)}
-                className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
+                className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg transition-colors ${
                   isActive
                     ? 'bg-restaurant-accent text-white font-semibold'
                     : 'text-restaurant-text-light dark:text-gray-400 hover:bg-cream-100 dark:hover:bg-slate-800 hover:text-restaurant-text dark:hover:text-white'
                 }`}
               >
-                <Icon size={20} />
-                <span className="text-sm">{item.label}</span>
+                <div className="flex items-center gap-3 min-w-0">
+                  <Icon size={19} className="shrink-0" />
+                  <span className="text-sm truncate">{item.label}</span>
+                </div>
+                {badgeCount !== undefined && badgeCount > 0 && (
+                  <span
+                    className={`ml-2 px-2 py-0.5 text-[11px] font-bold rounded-full shrink-0 shadow-xs ${
+                      isActive
+                        ? 'bg-white text-restaurant-accent'
+                        : item.href === '/admin/inventory' || item.href === '/admin/taken-materials'
+                        ? 'bg-amber-500 text-white'
+                        : item.href === '/admin/cake-orders'
+                        ? 'bg-pink-600 text-white animate-pulse'
+                        : 'bg-red-500 text-white animate-pulse'
+                    }`}
+                  >
+                    {badgeCount}
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -835,6 +1024,104 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
 
               <button
                 onClick={handleDismissUnreturnedModal}
+                className="px-4 py-1.5 rounded-xl border border-stone-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-stone-700 dark:text-slate-300 text-xs font-bold hover:bg-stone-100 dark:hover:bg-slate-800 transition"
+              >
+                {language === 'am' ? 'ለጊዜው ዝጋ' : 'Dismiss for Now'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CAKE ORDERS DELIVERY REMINDER MODAL */}
+      {showCakeOrdersModal && dueCakeOrders.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-slate-900 p-0 shadow-2xl border border-pink-200 dark:border-pink-900/60 overflow-hidden">
+            {/* MODAL HEADER */}
+            <div className="p-4 bg-gradient-to-r from-pink-600 to-rose-600 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-white/20 backdrop-blur-xs">
+                  <Cake size={22} className="text-white" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold">
+                    {language === 'am' ? 'የዛሬ የኬክ ርክክብ ማስታወሻ!' : 'Cake Delivery Reminder!'}
+                  </h3>
+                  <p className="text-xs text-pink-100">
+                    {dueCakeOrders.length}{' '}
+                    {language === 'am'
+                      ? 'ለዛሬ የሚረከቡ ወይም ያለፉ የኬክ ትዕዛዞች አሉ'
+                      : 'cake order(s) scheduled for delivery today or pending'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={handleDismissCakeOrdersModal}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* MODAL LIST */}
+            <div className="p-4 max-h-72 overflow-y-auto space-y-2.5 divide-y divide-cream-100 dark:divide-slate-800">
+              {dueCakeOrders.map((item) => (
+                <div key={item.id} className="pt-2.5 first:pt-0 flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-xs text-restaurant-text dark:text-white truncate">
+                        {item.customer_name}
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-pink-100 text-pink-700 dark:bg-pink-950 dark:text-pink-300">
+                        {item.weight_kg} KG
+                      </span>
+                    </div>
+
+                    {item.cake_text && (
+                      <p className="text-[11px] text-pink-600 dark:text-pink-400 font-serif italic truncate mt-0.5">
+                        &ldquo;{item.cake_text}&rdquo;
+                      </p>
+                    )}
+
+                    <div className="flex items-center gap-3 mt-1 text-[11px] text-gray-500">
+                      <span className="flex items-center gap-1 font-semibold text-amber-600 dark:text-amber-400">
+                        <Calendar size={12} />
+                        {new Date(item.delivery_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      {item.customer_phone && (
+                        <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                          <Phone size={12} />
+                          {item.customer_phone}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <span className={`px-2 py-1 rounded-lg text-[10px] font-bold uppercase shrink-0 ${
+                    item.status === 'ready'
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                      : item.status === 'preparing'
+                      ? 'bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300'
+                      : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                  }`}>
+                    {item.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* MODAL FOOTER */}
+            <div className="p-3.5 bg-stone-50 dark:bg-slate-800/60 border-t border-stone-200 dark:border-slate-800 flex items-center justify-between">
+              <Link
+                href="/admin/cake-orders"
+                onClick={() => setShowCakeOrdersModal(false)}
+                className="text-xs font-bold text-pink-600 hover:text-pink-700 hover:underline flex items-center gap-1"
+              >
+                <span>{language === 'am' ? 'ሁሉንም የኬክ ትዕዛዞች ተመልከት →' : 'View All Cake Orders →'}</span>
+              </Link>
+
+              <button
+                onClick={handleDismissCakeOrdersModal}
                 className="px-4 py-1.5 rounded-xl border border-stone-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-stone-700 dark:text-slate-300 text-xs font-bold hover:bg-stone-100 dark:hover:bg-slate-800 transition"
               >
                 {language === 'am' ? 'ለጊዜው ዝጋ' : 'Dismiss for Now'}
