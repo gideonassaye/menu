@@ -118,6 +118,57 @@ async function logOrderHistory({
    GET /api/orders
 ========================================================= */
 
+const ORDER_SELECT_QUERY = `
+  *,
+  order_items (
+    *,
+    menu_items (
+      id,
+      category_id,
+      categories (
+        id,
+        type
+      )
+    )
+  ),
+  payments (
+    id,
+    payment_method,
+    amount,
+    tip_amount,
+    payment_status,
+    receipt_image,
+    uploaded_at
+  )
+`.replace(/\s+/g, '')
+
+function enrichOrder(order: any) {
+  const rawItems = order.order_items || []
+  const enrichedItems = rawItems.map((item: any) => {
+    const { menu_items: menuItemRel, ...restItem } = item
+    const categoryType = menuItemRel?.categories?.type || 'unknown'
+    return {
+      ...restItem,
+      category_type: categoryType,
+    }
+  })
+
+  enrichedItems.sort(
+    (a: any, b: any) =>
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+  )
+
+  const payment =
+    order.payments && order.payments.length > 0 ? order.payments[0] : null
+
+  const { order_items, payments, ...restOrder } = order
+  return {
+    ...restOrder,
+    items: enrichedItems,
+    payment,
+  }
+}
+
 export async function GET(
   request: NextRequest
 ) {
@@ -138,7 +189,7 @@ export async function GET(
         error: orderError,
       } = await supabase
         .from('orders')
-        .select('*')
+        .select(ORDER_SELECT_QUERY)
         .eq('id', id)
         .single()
 
@@ -155,120 +206,9 @@ export async function GET(
         )
       }
 
-      const {
-        data: items,
-        error: itemsError,
-      } = await supabase
-        .from('order_items')
-        .select('*')
-        .eq('order_id', id)
-        .order('created_at', {
-          ascending: true,
-        })
-
-      if (itemsError) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: itemsError.message,
-          },
-          { status: 500 }
-        )
-      }
-
-      const menuItemIds = [
-        ...new Set(
-          (items || [])
-            .map(
-              (item) =>
-                item.menu_item_id
-            )
-            .filter(Boolean)
-        ),
-      ]
-
-      let enrichedItems =
-        items || []
-
-      if (
-        menuItemIds.length > 0
-      ) {
-        const {
-          data: menuItems,
-        } = await supabase
-          .from('menu_items')
-          .select(
-            'id, category_id'
-          )
-          .in(
-            'id',
-            menuItemIds
-          )
-
-        const categoryIds = [
-          ...new Set(
-            (menuItems || [])
-              .map(
-                (item) =>
-                  item.category_id
-              )
-              .filter(Boolean)
-          ),
-        ]
-
-        let categories:
-          any[] = []
-
-        if (
-          categoryIds.length > 0
-        ) {
-          const {
-            data: categoryData,
-          } = await supabase
-            .from('categories')
-            .select('id, type')
-            .in(
-              'id',
-              categoryIds
-            )
-
-          categories =
-            categoryData || []
-        }
-
-        enrichedItems =
-          (items || []).map(
-            (item) => {
-              const menuItem =
-                (menuItems || []).find(
-                  (menu) =>
-                    menu.id ===
-                    item.menu_item_id
-                )
-
-              const category =
-                categories.find(
-                  (cat) =>
-                    cat.id ===
-                    menuItem?.category_id
-                )
-
-              return {
-                ...item,
-                category_type:
-                  category?.type ||
-                  'unknown',
-              }
-            }
-          )
-      }
-
       return NextResponse.json({
         success: true,
-        data: {
-          ...order,
-          items: enrichedItems,
-        },
+        data: enrichOrder(order),
       })
     }
 
@@ -281,7 +221,7 @@ export async function GET(
       error,
     } = await supabase
       .from('orders')
-      .select('*')
+      .select(ORDER_SELECT_QUERY)
       .order('created_at', {
         ascending: false,
       })
@@ -301,137 +241,7 @@ export async function GET(
       )
     }
 
-    const orderIds =
-      (orders || []).map(
-        (order) => order.id
-      )
-
-    let allItems: any[] = []
-
-    if (
-      orderIds.length > 0
-    ) {
-      const {
-        data: items,
-      } = await supabase
-        .from('order_items')
-        .select('*')
-        .in(
-          'order_id',
-          orderIds
-        )
-        .order('created_at', {
-          ascending: true,
-        })
-
-      allItems =
-        items || []
-    }
-
-    const menuItemIds = [
-      ...new Set(
-        allItems
-          .map(
-            (item) =>
-              item.menu_item_id
-          )
-          .filter(Boolean)
-      ),
-    ]
-
-    let menuItems:
-      any[] = []
-
-    if (
-      menuItemIds.length > 0
-    ) {
-      const {
-        data,
-      } = await supabase
-        .from('menu_items')
-        .select(
-          'id, category_id'
-        )
-        .in(
-          'id',
-          menuItemIds
-        )
-
-      menuItems =
-        data || []
-    }
-
-    const categoryIds = [
-      ...new Set(
-        menuItems
-          .map(
-            (item) =>
-              item.category_id
-          )
-          .filter(Boolean)
-      ),
-    ]
-
-    let categories:
-      any[] = []
-
-    if (
-      categoryIds.length > 0
-    ) {
-      const {
-        data,
-      } = await supabase
-        .from('categories')
-        .select(
-          'id, type'
-        )
-        .in(
-          'id',
-          categoryIds
-        )
-
-      categories =
-        data || []
-    }
-
-    const enrichedItems =
-      allItems.map(
-        (item) => {
-          const menuItem =
-            menuItems.find(
-              (menu) =>
-                menu.id ===
-                item.menu_item_id
-            )
-
-          const category =
-            categories.find(
-              (cat) =>
-                cat.id ===
-                menuItem?.category_id
-            )
-
-          return {
-            ...item,
-            category_type:
-              category?.type ||
-              'unknown',
-          }
-        }
-      )
-
-    const completeOrders =
-      (orders || []).map(
-        (order) => ({
-          ...order,
-          items:
-            enrichedItems.filter(
-              (item) =>
-                item.order_id ===
-                order.id
-            ),
-        })
-      )
+    const completeOrders = (orders || []).map(enrichOrder)
 
     return NextResponse.json({
       success: true,

@@ -131,6 +131,14 @@ function formatPaymentMethod(method: string | null) {
   }
 }
 
+function chunkArray<T>(array: T[], size: number): T[][] {
+  const chunks: T[][] = []
+  for (let i = 0; i < array.length; i += size) {
+    chunks.push(array.slice(i, i + size))
+  }
+  return chunks
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
@@ -202,25 +210,20 @@ export async function GET(request: NextRequest) {
     let items: any[] = []
 
     if (orderIds.length > 0) {
-      const {
-        data: itemData,
-        error: itemsError,
-      } = await supabase
-        .from('order_items')
-        .select('*')
-        .in('order_id', orderIds)
-        .order('created_at', {
-          ascending: true,
-        })
-
-      if (itemsError) {
-        console.error(
-          'Report items error:',
-          itemsError
+      const chunks = chunkArray(orderIds, 50)
+      const itemResults = await Promise.all(
+        chunks.map((chunk) =>
+          supabase
+            .from('order_items')
+            .select('*')
+            .in('order_id', chunk)
+            .order('created_at', {
+              ascending: true,
+            })
         )
-      }
+      )
 
-      items = itemData || []
+      items = itemResults.flatMap((r) => r.data || [])
     }
 
     /*
@@ -232,30 +235,17 @@ export async function GET(request: NextRequest) {
     let payments: any[] = []
 
     if (orderIds.length > 0) {
-      const {
-        data: paymentData,
-        error: paymentsError,
-      } = await supabase
-        .from('payments')
-        .select('*')
-        .in('order_id', orderIds)
-
-      if (paymentsError) {
-        console.error(
-          'Report payments error:',
-          paymentsError
+      const chunks = chunkArray(orderIds, 50)
+      const paymentResults = await Promise.all(
+        chunks.map((chunk) =>
+          supabase
+            .from('payments')
+            .select('*')
+            .in('order_id', chunk)
         )
+      )
 
-        return NextResponse.json(
-          {
-            success: false,
-            error: paymentsError.message,
-          },
-          { status: 500 }
-        )
-      }
-
-      payments = paymentData || []
+      payments = paymentResults.flatMap((r) => r.data || [])
     }
 
     /*
@@ -333,17 +323,18 @@ export async function GET(request: NextRequest) {
     let orderHistories: any[] = []
 
     if (orderIds.length > 0) {
-      const { data: historyData, error: historyError } = await supabase
-        .from('order_history')
-        .select('*')
-        .in('order_id', orderIds)
-        .order('created_at', { ascending: true })
+      const chunks = chunkArray(orderIds, 50)
+      const historyResults = await Promise.all(
+        chunks.map((chunk) =>
+          supabase
+            .from('order_history')
+            .select('*')
+            .in('order_id', chunk)
+            .order('created_at', { ascending: true })
+        )
+      )
 
-      if (historyError) {
-        console.error('Report history error:', historyError)
-      }
-
-      orderHistories = historyData || []
+      orderHistories = historyResults.flatMap((r) => r.data || [])
     }
 
     /*
