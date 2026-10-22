@@ -38,7 +38,13 @@ import {
   TrendingUp,
   TrendingDown,
   ReceiptText,
+  Lock,
 } from 'lucide-react'
+import { getAdminAuth } from '@/lib/admin-auth'
+
+const REPORT_PASSWORD = 'admin@1234'
+
+type ReportPaymentMethod = 'cash' | 'cbe' | 'telebirr'
 
 type Period = 'today' | 'week' | 'month' | 'year' | 'custom'
 
@@ -141,6 +147,90 @@ export default function OrdersReportPage() {
   )
 }
 
+/*
+ * ============================================================
+ * REPORT PASSWORD LOCK (BLURS REPORT UNTIL PASSWORD ENTERED)
+ * ============================================================
+ */
+
+function ReportPasswordLock({
+  children,
+  unlocked,
+  onUnlock,
+}: {
+  children: React.ReactNode
+  unlocked: boolean
+  onUnlock: () => void
+}) {
+  const { language } = useAdminLanguage()
+  const [password, setPassword] = useState('')
+  const [lockError, setLockError] = useState('')
+
+  if (unlocked) {
+    return <>{children}</>
+  }
+
+  const handleUnlock = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (password === REPORT_PASSWORD) {
+      onUnlock()
+      setLockError('')
+    } else {
+      setLockError(language === 'am' ? 'የተሳሳተ የይለፍ ቃል' : 'Incorrect password')
+    }
+  }
+
+  return (
+    <div className="relative">
+      <div aria-hidden="true" className="space-y-6 blur-md pointer-events-none select-none">
+        {children}
+      </div>
+
+      <div className="absolute inset-0 z-30 flex items-start justify-center pt-16 px-4">
+        <form
+          onSubmit={handleUnlock}
+          className="w-full max-w-sm rounded-2xl border border-stone-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 shadow-xl space-y-4"
+        >
+          <div className="flex flex-col items-center text-center gap-2">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-restaurant-accent/15 text-restaurant-accent">
+              <Lock size={24} />
+            </div>
+            <h2 className="text-lg font-bold text-stone-900 dark:text-white">
+              {language === 'am' ? 'ሪፖርቱ ተቆልፏል' : 'Report Locked'}
+            </h2>
+            <p className="text-xs font-medium text-stone-600 dark:text-stone-300">
+              {language === 'am' ? 'ሪፖርቱን ለማየት የይለፍ ቃል ያስገቡ' : 'Enter the password to view the report'}
+            </p>
+          </div>
+
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => {
+              setPassword(e.target.value)
+              setLockError('')
+            }}
+            autoFocus
+            placeholder={language === 'am' ? 'የይለፍ ቃል' : 'Password'}
+            className="w-full rounded-xl border border-stone-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-2.5 text-sm text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-restaurant-accent"
+          />
+
+          {lockError && (
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400">{lockError}</p>
+          )}
+
+          <button
+            type="submit"
+            className="w-full rounded-xl bg-restaurant-accent px-4 py-2.5 text-sm font-bold text-white hover:bg-restaurant-accent-dark transition shadow-sm"
+          >
+            {language === 'am' ? 'ክፈት' : 'Unlock'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 function OrdersReportPageContent() {
   const { language, setLanguage, t } = useAdminLanguage()
 
@@ -172,6 +262,12 @@ function OrdersReportPageContent() {
 
   // Lightbox for payment screenshot
   const [selectedReceiptImage, setSelectedReceiptImage] = useState<string | null>(null)
+
+  // Payment Method Correction State
+  const [updatingPaymentOrderId, setUpdatingPaymentOrderId] = useState<string | null>(null)
+
+  // Sales Figures Password Lock State
+  const [salesUnlocked, setSalesUnlocked] = useState(false)
 
   // Daily Expenses (Money Out) State
   const [expenses, setExpenses] = useState<DailyExpense[]>([])
@@ -273,6 +369,50 @@ function OrdersReportPageContent() {
   useEffect(() => {
     loadReport()
   }, [loadReport])
+
+  const handleUpdatePaymentMethod = async (order: Order, newMethod: ReportPaymentMethod) => {
+    const currentMethod = (order.payment?.payment_method || '').toLowerCase()
+    if (!order.payment || currentMethod === newMethod) return
+
+    const confirmed = window.confirm(
+      language === 'am'
+        ? `የክፍያ ዘዴውን ወደ ${newMethod.toUpperCase()} መቀየር ይፈልጋሉ?`
+        : `Change payment method from ${currentMethod.toUpperCase()} to ${newMethod.toUpperCase()}?`
+    )
+    if (!confirmed) return
+
+    try {
+      setUpdatingPaymentOrderId(order.id)
+      let userRole: string | undefined
+      try {
+        const auth = await getAdminAuth()
+        userRole = auth?.adminUser?.role
+      } catch (e) {}
+
+      const response = await fetch('/api/orders', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: order.id,
+          action: 'update_payment_method',
+          payment_method: newMethod,
+          user_role: userRole,
+        }),
+      })
+
+      const result = await response.json()
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || 'Failed to update payment method')
+      }
+
+      await loadReport(true)
+    } catch (err) {
+      console.error('Update payment method error:', err)
+      alert(err instanceof Error ? err.message : 'Failed to update payment method.')
+    } finally {
+      setUpdatingPaymentOrderId(null)
+    }
+  }
 
   const handleAddExpense = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -860,6 +1000,8 @@ function OrdersReportPageContent() {
         )}
       </div>
 
+      {/* SALES FIGURES (PASSWORD LOCKED) */}
+      <ReportPasswordLock unlocked={salesUnlocked} onUnlock={() => setSalesUnlocked(true)}>
       {/* PRIMARY EXECUTIVE KPI METRICS */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
         {/* Total Revenue */}
@@ -1472,6 +1614,8 @@ function OrdersReportPageContent() {
         )}
       </div>
 
+      </ReportPasswordLock>
+
       {/* ORDERS MANAGEMENT SECTION GROUPED BY TABLES (ACCORDIONS) */}
       <div className="space-y-4">
         {/* Section Header & Filters */}
@@ -1891,6 +2035,41 @@ function OrdersReportPageContent() {
                                             {isCash ? t.cash : isCbe ? t.cbe : isTelebirr ? t.telebirr : (order.payment?.payment_method || 'CASH')}
                                           </span>
                                         </div>
+
+                                        {/* CHANGE PAYMENT METHOD (FIX WRONG SELECTION) */}
+                                        {order.payment && (
+                                          <div className="pt-2 space-y-1.5">
+                                            <span className="block text-[11px] font-semibold text-stone-600 dark:text-stone-400">
+                                              {language === 'am' ? 'የክፍያ ዘዴ ቀይር:' : 'Change payment method:'}
+                                            </span>
+                                            <div className="flex gap-1.5">
+                                              {(
+                                                [
+                                                  ['cash', t.cash],
+                                                  ['cbe', t.cbe],
+                                                  ['telebirr', t.telebirr],
+                                                ] as [ReportPaymentMethod, string][]
+                                              ).map(([value, label]) => {
+                                                const isCurrent = paymentMethod === value
+                                                return (
+                                                  <button
+                                                    key={value}
+                                                    type="button"
+                                                    disabled={isCurrent || updatingPaymentOrderId === order.id}
+                                                    onClick={() => handleUpdatePaymentMethod(order, value)}
+                                                    className={`flex-1 rounded-lg px-2 py-1.5 text-[11px] font-bold border transition disabled:cursor-not-allowed ${
+                                                      isCurrent
+                                                        ? 'bg-restaurant-accent text-white border-restaurant-accent'
+                                                        : 'bg-white dark:bg-slate-900 text-stone-800 dark:text-stone-200 border-stone-300 dark:border-slate-600 hover:border-restaurant-accent disabled:opacity-50'
+                                                    }`}
+                                                  >
+                                                    {label}
+                                                  </button>
+                                                )
+                                              })}
+                                            </div>
+                                          </div>
+                                        )}
                                       </div>
                                     </div>
 

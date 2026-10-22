@@ -1081,6 +1081,70 @@ export async function PUT(
     }
 
     /* =====================================================
+       UPDATE PAYMENT METHOD (FIX WRONGLY SELECTED METHOD)
+    ===================================================== */
+
+    if (action === 'update_payment_method') {
+      if (!PAYMENT_METHODS.includes(payment_method)) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid payment method. Use CASH, CBE, or TELEBIRR.' },
+          { status: 400 }
+        )
+      }
+
+      const { data: existingPmts, error: pmtLookupError } = await supabase
+        .from('payments')
+        .select('id, payment_method')
+        .eq('order_id', id)
+
+      if (pmtLookupError || !existingPmts || existingPmts.length === 0) {
+        return NextResponse.json(
+          { success: false, error: 'No payment found for this order' },
+          { status: 404 }
+        )
+      }
+
+      const previousMethod = existingPmts[0].payment_method
+
+      const { error: pmtUpdateError } = await supabase
+        .from('payments')
+        .update({ payment_method })
+        .eq('order_id', id)
+
+      if (pmtUpdateError) {
+        return NextResponse.json(
+          { success: false, error: pmtUpdateError.message || 'Failed to update payment method' },
+          { status: 500 }
+        )
+      }
+
+      const { data: ord } = await supabase
+        .from('orders')
+        .select('order_number, status')
+        .eq('id', id)
+        .maybeSingle()
+
+      await logOrderHistory({
+        orderId: id,
+        previousStatus: ord?.status || null,
+        newStatus: ord?.status || 'paid',
+        note: `Payment method changed from ${String(previousMethod || '').toUpperCase()} to ${payment_method.toUpperCase()}`,
+      })
+
+      await logAction({
+        action_type: 'ORDER_UPDATED',
+        description: `Changed payment method for order #${ord?.order_number || id} from ${String(previousMethod || '').toUpperCase()} to ${payment_method.toUpperCase()}`,
+        role: user_role || 'cashier',
+        metadata: { order_id: id, previous_method: previousMethod, payment_method },
+      })
+
+      return NextResponse.json({
+        success: true,
+        message: 'Payment method updated successfully.',
+      })
+    }
+
+    /* =====================================================
        RECORD PAYMENT
     ===================================================== */
 
