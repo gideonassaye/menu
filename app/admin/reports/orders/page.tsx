@@ -113,6 +113,7 @@ type Order = {
   items: OrderItem[]
   payment: Payment | null
   timeline?: OrderTimeline
+  merged_orders?: Order[]
 }
 
 type Summary = {
@@ -130,6 +131,86 @@ type GraphPoint = {
   amount: number
   orderCount?: number
   sortKey?: number
+}
+
+/*
+ * ============================================================
+ * MERGE ORDERS SETTLED TOGETHER AT THE SAME TABLE
+ * ============================================================
+ * Combined table settlements create one payment per order a few
+ * seconds apart, so orders at the same table with the same method
+ * paid within this window are shown as a single settlement.
+ */
+
+const SETTLEMENT_WINDOW_MS = 30 * 1000
+
+function getPaymentTime(order: Order): number {
+  return new Date(
+    order.payment?.confirmed_at ||
+      order.payment?.uploaded_at ||
+      order.timeline?.paid_at ||
+      order.updated_at
+  ).getTime()
+}
+
+function combineSettledOrders(batch: Order[]): Order {
+  const first = batch[0]
+  const last = batch[batch.length - 1]
+  const sum = (pick: (o: Order) => number) => batch.reduce((acc, o) => acc + pick(o), 0)
+
+  return {
+    ...first,
+    items: batch.flatMap((o) => o.items || []),
+    subtotal: sum((o) => Number(o.subtotal || o.total || 0)),
+    discount: sum((o) => Number(o.discount || 0)),
+    tax: sum((o) => Number(o.tax || 0)),
+    total: sum((o) => Number(o.total || 0)),
+    notes: batch.map((o) => o.notes).filter(Boolean).join(' | ') || null,
+    customer_name: batch.find((o) => o.customer_name)?.customer_name || null,
+    waiter_name: batch.find((o) => o.waiter_name)?.waiter_name || null,
+    payment: first.payment
+      ? {
+          ...first.payment,
+          amount: sum((o) => Number(o.payment?.amount || o.total || 0)),
+          receipt_image: batch.find((o) => o.payment?.receipt_image)?.payment?.receipt_image || null,
+        }
+      : null,
+    timeline: first.timeline
+      ? { ...first.timeline, paid_at: last.timeline?.paid_at || first.timeline.paid_at }
+      : undefined,
+    merged_orders: batch,
+  }
+}
+
+function mergeSettledOrders(orders: Order[]): Order[] {
+  const position = new Map(orders.map((o, i) => [o.id, i]))
+  const sorted = [...orders].sort((a, b) => getPaymentTime(a) - getPaymentTime(b))
+  const batches: Order[][] = []
+
+  for (const order of sorted) {
+    const batch = batches[batches.length - 1]
+    const prev = batch?.[batch.length - 1]
+    const sameSettlement =
+      prev &&
+      order.table_id &&
+      order.table_id === prev.table_id &&
+      order.payment &&
+      prev.payment &&
+      String(order.payment.payment_method || '').toLowerCase() ===
+        String(prev.payment.payment_method || '').toLowerCase() &&
+      getPaymentTime(order) - getPaymentTime(prev) <= SETTLEMENT_WINDOW_MS
+
+    if (sameSettlement) {
+      batch.push(order)
+    } else {
+      batches.push([order])
+    }
+  }
+
+  // Keep the report's original ordering
+  return batches
+    .map((batch) => (batch.length === 1 ? batch[0] : combineSettledOrders(batch)))
+    .sort((a, b) => (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0))
 }
 
 function getLocalDateString(d: Date = new Date()): string {
@@ -394,6 +475,7 @@ function OrdersReportPageContent() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: order.id,
+          ids: (order.merged_orders || [order]).map((o) => o.id),
           action: 'update_payment_method',
           payment_method: newMethod,
           user_role: userRole,
@@ -778,13 +860,14 @@ function OrdersReportPageContent() {
 
   // Group closed orders by Table for Report Accordions
   const reportTableGroups = useMemo(() => {
-    const map = new Map<string, { tableName: string; orders: Order[]; totalRevenue: number; itemsCount: number }>()
+    const map = new Map<string, { tableName: string; orders: Order[]; settlements: Order[]; totalRevenue: number; itemsCount: number }>()
     for (const order of filteredOrders) {
       const name = order.table_name || (language === 'am' ? 'ፓኮ / መውሰጃ' : 'Takeaway / Delivery')
       if (!map.has(name)) {
         map.set(name, {
           tableName: name,
           orders: [],
+          settlements: [],
           totalRevenue: 0,
           itemsCount: 0,
         })
@@ -793,6 +876,9 @@ function OrdersReportPageContent() {
       grp.orders.push(order)
       grp.totalRevenue += Number(order.total || 0)
       grp.itemsCount += (order.items || []).reduce((sum, it) => sum + (Number(it.quantity) || 1), 0)
+    }
+    for (const grp of map.values()) {
+      grp.settlements = mergeSettledOrders(grp.orders)
     }
     return Array.from(map.values())
   }, [filteredOrders, language])
@@ -1760,7 +1846,7 @@ function OrdersReportPageContent() {
                   {/* TABLE ACCORDION BODY (LIST OF ORDERS AT THIS TABLE) */}
                   {!isCollapsed && (
                     <div className="p-3 sm:p-4 space-y-3 bg-stone-50/40 dark:bg-slate-900">
-                      {group.orders.map((order) => {
+                      {group.settlements.map((order) => {
                         const expanded = expandedOrderId === order.id
                         const paymentMethod = (order.payment?.payment_method || 'Unknown').toLowerCase()
                         const paymentAmount = Number(order.payment?.amount || order.total || 0)
@@ -1795,10 +1881,22 @@ function OrdersReportPageContent() {
                                   <div>
                                     <div className="flex items-center gap-2 flex-wrap">
                                       <h3 className="font-bold text-sm sm:text-base text-stone-900 dark:text-white">
-                                        {order.order_number.startsWith('order-')
-                                          ? order.order_number
-                                          : `#${order.order_number}`}
+                                        {(order.merged_orders || [order])
+                                          .map((o) =>
+                                            o.order_number.startsWith('order-')
+                                              ? o.order_number
+                                              : `#${o.order_number}`
+                                          )
+                                          .join(', ')}
                                       </h3>
+
+                                      {order.merged_orders && (
+                                        <span className="rounded-full bg-sky-100 dark:bg-sky-950 px-2.5 py-0.5 text-xs font-bold text-sky-800 dark:text-sky-300 border border-sky-300 dark:border-sky-800">
+                                          {language === 'am'
+                                            ? `${order.merged_orders.length} ትዕዛዞች በአንድ ላይ ተከፍለዋል`
+                                            : `${order.merged_orders.length} orders settled together`}
+                                        </span>
+                                      )}
 
                                       <span className="rounded-full bg-emerald-100 dark:bg-emerald-950 px-2.5 py-0.5 text-xs font-bold text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
                                         {t.paid}

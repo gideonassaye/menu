@@ -1092,10 +1092,13 @@ export async function PUT(
         )
       }
 
+      // Supports a single order or all orders settled together at a table
+      const targetOrderIds: string[] = Array.isArray(ids) && ids.length > 0 ? ids : [id]
+
       const { data: existingPmts, error: pmtLookupError } = await supabase
         .from('payments')
         .select('id, payment_method')
-        .eq('order_id', id)
+        .in('order_id', targetOrderIds)
 
       if (pmtLookupError || !existingPmts || existingPmts.length === 0) {
         return NextResponse.json(
@@ -1109,7 +1112,7 @@ export async function PUT(
       const { error: pmtUpdateError } = await supabase
         .from('payments')
         .update({ payment_method })
-        .eq('order_id', id)
+        .in('order_id', targetOrderIds)
 
       if (pmtUpdateError) {
         return NextResponse.json(
@@ -1118,24 +1121,29 @@ export async function PUT(
         )
       }
 
-      const { data: ord } = await supabase
+      const { data: targetOrders } = await supabase
         .from('orders')
-        .select('order_number, status')
-        .eq('id', id)
-        .maybeSingle()
+        .select('id, order_number, status')
+        .in('id', targetOrderIds)
 
-      await logOrderHistory({
-        orderId: id,
-        previousStatus: ord?.status || null,
-        newStatus: ord?.status || 'paid',
-        note: `Payment method changed from ${String(previousMethod || '').toUpperCase()} to ${payment_method.toUpperCase()}`,
-      })
+      for (const ord of targetOrders || []) {
+        await logOrderHistory({
+          orderId: ord.id,
+          previousStatus: ord.status || null,
+          newStatus: ord.status || 'paid',
+          note: `Payment method changed from ${String(previousMethod || '').toUpperCase()} to ${payment_method.toUpperCase()}`,
+        })
+      }
+
+      const orderNumbersStr = (targetOrders || [])
+        .map((o) => (o.order_number.startsWith('order-') ? o.order_number : `#${o.order_number}`))
+        .join(', ')
 
       await logAction({
         action_type: 'ORDER_UPDATED',
-        description: `Changed payment method for order #${ord?.order_number || id} from ${String(previousMethod || '').toUpperCase()} to ${payment_method.toUpperCase()}`,
+        description: `Changed payment method for order(s) ${orderNumbersStr || id} from ${String(previousMethod || '').toUpperCase()} to ${payment_method.toUpperCase()}`,
         role: user_role || 'cashier',
-        metadata: { order_id: id, previous_method: previousMethod, payment_method },
+        metadata: { order_ids: targetOrderIds, previous_method: previousMethod, payment_method },
       })
 
       return NextResponse.json({
