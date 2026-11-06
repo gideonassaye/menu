@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AdminLayout } from '@/components/admin/AdminLayout'
 import { getAdminAuth } from '@/lib/admin-auth'
 import { supabase } from '@/lib/supabase'
+import { debounce } from '@/lib/utils/common'
 import { useAdminLanguage } from '@/lib/i18n/AdminLanguageContext'
 import { compressReceiptImage } from '@/lib/utils/image'
 import {
@@ -150,6 +151,7 @@ export default function WaiterPage() {
   const [categories, setCategories] = useState<MenuCategory[]>([])
   const [menuItems, setMenuItems] = useState<MenuItem[]>([])
   const [orders, setOrders] = useState<WaiterOrder[]>([])
+  const [recentItemSales, setRecentItemSales] = useState<{ menu_item_id: string | null; quantity: number }[]>([])
 
   const [selectedTable, setSelectedTable] = useState<Table | null>(null)
   const [cart, setCart] = useState<CartItem[]>([])
@@ -241,7 +243,7 @@ export default function WaiterPage() {
       if (!silent) setRefreshing(true)
       const [tablesResponse, ordersResponse] = await Promise.all([
         fetch('/api/tables', { cache: 'no-store' }),
-        fetch('/api/orders', { cache: 'no-store' }),
+        fetch('/api/orders?active=true', { cache: 'no-store' }),
       ])
 
       const tablesResult = await tablesResponse.json()
@@ -281,21 +283,20 @@ export default function WaiterPage() {
   useEffect(() => {
     loadData()
 
+    // One save can fire several events, so combine them into a single reload
+    const refreshDynamicData = debounce(() => loadDynamicData(true), 1000)
+
     const channel = supabase
       .channel(`waiter-live-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'tables' },
-        () => {
-          loadDynamicData(true)
-        }
+        refreshDynamicData
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'orders' },
-        () => {
-          loadDynamicData(true)
-        }
+        refreshDynamicData
       )
       .on(
         'postgres_changes',
@@ -322,7 +323,9 @@ export default function WaiterPage() {
 
     // 90-second safety fallback refresh (Realtime WebSockets is primary live source)
     const interval = setInterval(() => {
-      loadDynamicData(true)
+      if (document.visibilityState === 'visible') {
+        loadDynamicData(true)
+      }
     }, 90000)
 
     // Refresh dynamic data when switching back to tab
@@ -336,11 +339,24 @@ export default function WaiterPage() {
 
     return () => {
       clearInterval(interval)
+      refreshDynamicData.cancel()
       window.removeEventListener('visibilitychange', handleFocus)
       window.removeEventListener('focus', handleFocus)
       supabase.removeChannel(channel)
     }
   }, [loadData, loadDynamicData, loadStaticMenu])
+
+  // Recent sales for the "frequently ordered" list (only needed once per visit)
+  useEffect(() => {
+    fetch('/api/orders?view=popular_items', { cache: 'no-store' })
+      .then((res) => res.json())
+      .then((result) => {
+        if (result.success && Array.isArray(result.data)) {
+          setRecentItemSales(result.data)
+        }
+      })
+      .catch(() => {})
+  }, [])
 
   // Filter ready orders for waiters
   const readyOrders = useMemo(() => {
@@ -438,15 +454,10 @@ export default function WaiterPage() {
   const frequentlyOrderedItems = useMemo(() => {
     const counts = new Map<string, number>()
 
-    orders.forEach((order) => {
-      if (Array.isArray(order.items)) {
-        order.items.forEach((item) => {
-          const itemId = item.menu_item_id
-          if (itemId) {
-            const qty = Number(item.quantity) || 1
-            counts.set(itemId, (counts.get(itemId) || 0) + qty)
-          }
-        })
+    recentItemSales.forEach((sale) => {
+      if (sale.menu_item_id) {
+        const qty = Number(sale.quantity) || 1
+        counts.set(sale.menu_item_id, (counts.get(sale.menu_item_id) || 0) + qty)
       }
     })
 
@@ -464,7 +475,7 @@ export default function WaiterPage() {
     }
 
     return menuItems.filter((item) => item.available).slice(0, 6)
-  }, [orders, menuItems])
+  }, [recentItemSales, menuItems])
 
   // ---------------------------------------------------------
   // CART OPERATIONS

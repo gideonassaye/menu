@@ -213,15 +213,90 @@ export async function GET(
     }
 
     /* =====================================================
-       ALL ORDERS
+       SIDEBAR BADGE COUNTS (LIGHTWEIGHT)
     ===================================================== */
+
+    const view = searchParams.get('view')
+
+    if (view === 'counts') {
+      const { data, error: countsError } = await supabase
+        .from('orders')
+        .select('status,order_items(status,quantity,menu_items(categories(type)))')
+        .in('status', ['pending', 'confirmed', 'preparing', 'ready', 'payment_pending'])
+
+      if (countsError) {
+        return NextResponse.json(
+          { success: false, error: countsError.message },
+          { status: 500 }
+        )
+      }
+
+      let cashier = 0
+      let kitchen = 0
+      let drinksKitchen = 0
+
+      for (const order of (data || []) as any[]) {
+        if (['pending', 'confirmed', 'ready', 'payment_pending'].includes(order.status)) {
+          cashier += 1
+        }
+
+        if (['confirmed', 'preparing', 'pending'].includes(order.status)) {
+          for (const item of order.order_items || []) {
+            if (['pending', 'confirmed', 'preparing'].includes(item.status)) {
+              const type = String(item.menu_items?.categories?.type || '').toLowerCase()
+              if (type === 'drink' || type === 'drinks') {
+                drinksKitchen += item.quantity || 1
+              } else {
+                kitchen += item.quantity || 1
+              }
+            }
+          }
+        }
+      }
+
+      return NextResponse.json({
+        success: true,
+        data: { cashier, kitchen, drinksKitchen },
+      })
+    }
+
+    /* =====================================================
+       RECENT ITEM SALES (WAITER "FREQUENTLY ORDERED" LIST)
+    ===================================================== */
+
+    if (view === 'popular_items') {
+      const { data, error: popularError } = await supabase
+        .from('order_items')
+        .select('menu_item_id,quantity')
+        .order('created_at', { ascending: false })
+        .limit(1000)
+
+      if (popularError) {
+        return NextResponse.json(
+          { success: false, error: popularError.message },
+          { status: 500 }
+        )
+      }
+
+      return NextResponse.json({ success: true, data: data || [] })
+    }
+
+    /* =====================================================
+       ALL ORDERS (OR ONLY UNFINISHED ORDERS WITH ?active=true)
+    ===================================================== */
+
+    let ordersQuery = supabase
+      .from('orders')
+      .select(ORDER_SELECT_QUERY)
+
+    if (searchParams.get('active') === 'true') {
+      ordersQuery = ordersQuery.not('status', 'in', '(completed,cancelled,paid)')
+    }
 
     const {
       data: orders,
       error,
-    } = await supabase
-      .from('orders')
-      .select(ORDER_SELECT_QUERY)
+    } = await ordersQuery
       .order('created_at', {
         ascending: false,
       })

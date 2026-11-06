@@ -31,6 +31,7 @@ import {
 import { compressReceiptImage } from '@/lib/utils/image';
 import { useAdminLanguage } from '@/lib/i18n/AdminLanguageContext';
 import { RushModeView } from '@/components/admin/RushModeView';
+import { debounce } from '@/lib/utils/common';
 
 type LocalizedName =
   | string
@@ -187,7 +188,7 @@ export default function OrdersPage() {
       if (!silent) setLoading(true);
 
       const response = await fetch(
-        '/api/orders',
+        '/api/orders?active=true',
         {
           cache: 'no-store',
         }
@@ -225,28 +226,27 @@ export default function OrdersPage() {
     loadTables();
     loadMenuAndCategories();
 
+    // One save can fire several events, so combine them into a single reload
+    const refreshOrders = debounce(() => loadOrders(true), 1000);
+
     // Unique channel to avoid collisions across multiple browser tabs
     const channel = supabase
       .channel(`admin-orders-realtime-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'orders' },
-        () => {
-          loadOrders(true);
-        }
+        refreshOrders
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'order_items' },
-        () => {
-          loadOrders(true);
-        }
+        refreshOrders
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'tables' },
         () => {
-          loadOrders(true);
+          refreshOrders();
           loadTables();
         }
       )
@@ -261,7 +261,9 @@ export default function OrdersPage() {
 
     // 90-second safety fallback refresh (Realtime WebSockets is primary live source)
     const pollInterval = setInterval(() => {
-      loadOrders(true);
+      if (document.visibilityState === 'visible') {
+        loadOrders(true);
+      }
     }, 90000);
 
     // Refresh instantly when user switches back to this browser tab
@@ -276,6 +278,7 @@ export default function OrdersPage() {
 
     return () => {
       clearInterval(pollInterval);
+      refreshOrders.cancel();
       window.removeEventListener('visibilitychange', handleFocus);
       window.removeEventListener('focus', handleFocus);
       supabase.removeChannel(channel);

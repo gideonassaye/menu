@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 're
 import { AdminLayout } from '@/components/admin/AdminLayout'
 import { useAdminLanguage } from '@/lib/i18n/AdminLanguageContext'
 import { supabase } from '@/lib/supabase'
+import { debounce } from '@/lib/utils/common'
 import {
   Table2,
   Plus,
@@ -132,7 +133,7 @@ export default function TablesPage() {
 
       // Fetch orders safely
       try {
-        const ordersRes = await fetch('/api/orders', { cache: 'no-store' })
+        const ordersRes = await fetch('/api/orders?active=true', { cache: 'no-store' })
         if (ordersRes.ok) {
           const ordersJson = await ordersRes.json()
           if (ordersJson.success && Array.isArray(ordersJson.data)) {
@@ -161,17 +162,20 @@ export default function TablesPage() {
   useEffect(() => {
     loadData()
 
+    // One save can fire several events, so combine them into a single reload
+    const refreshData = debounce(() => loadData(false), 1000)
+
     const channel = supabase
       .channel(`tables-page-live-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'tables' },
-        () => loadData(false)
+        refreshData
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'orders' },
-        () => loadData(false)
+        refreshData
       )
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
@@ -184,7 +188,9 @@ export default function TablesPage() {
 
     // 90-second safety fallback refresh (Realtime WebSockets is primary live source)
     const interval = setInterval(() => {
-      loadData(false)
+      if (document.visibilityState === 'visible') {
+        loadData(false)
+      }
     }, 90000)
 
     // Refresh table data when switching back to tab
@@ -198,6 +204,7 @@ export default function TablesPage() {
 
     return () => {
       clearInterval(interval)
+      refreshData.cancel()
       window.removeEventListener('visibilitychange', handleFocus)
       window.removeEventListener('focus', handleFocus)
       supabase.removeChannel(channel)

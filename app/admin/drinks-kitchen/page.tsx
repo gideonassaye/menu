@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { AdminLayout } from '@/components/admin/AdminLayout'
 import { supabase } from '@/lib/supabase'
+import { debounce } from '@/lib/utils/common'
 import { playNotificationSound } from '@/lib/audio'
 import { useAdminLanguage } from '@/lib/i18n/AdminLanguageContext'
 import {
@@ -105,7 +106,7 @@ export default function KitchenPage() {
       setError('')
 
       const [ordersResponse, tablesResponse] = await Promise.all([
-        fetch('/api/orders', { cache: 'no-store' }),
+        fetch('/api/orders?active=true', { cache: 'no-store' }),
         fetch('/api/tables', { cache: 'no-store' }),
       ])
 
@@ -154,18 +155,15 @@ export default function KitchenPage() {
   useEffect(() => {
     loadOrders()
 
+    // One save can fire several events, so combine them into a single reload
+    const refreshOrders = debounce(() => loadOrders(false), 1000)
+
     // Realtime channel with unique timestamp to guarantee clean connection
     const channel = supabase
       .channel(`drinks-kitchen-live-${Date.now()}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
-        loadOrders(false)
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => {
-        loadOrders(false)
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tables' }, () => {
-        loadOrders(false)
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, refreshOrders)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, refreshOrders)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tables' }, refreshOrders)
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           setChannelConnected(true)
@@ -177,7 +175,9 @@ export default function KitchenPage() {
 
     // 90-second safety fallback refresh (Realtime WebSockets is primary live source)
     const pollInterval = setInterval(() => {
-      loadOrders(false)
+      if (document.visibilityState === 'visible') {
+        loadOrders(false)
+      }
     }, 90000)
 
     // Refresh dynamic data when switching back to tab
@@ -191,6 +191,7 @@ export default function KitchenPage() {
 
     return () => {
       clearInterval(pollInterval)
+      refreshOrders.cancel()
       window.removeEventListener('visibilitychange', handleFocus)
       window.removeEventListener('focus', handleFocus)
       supabase.removeChannel(channel)

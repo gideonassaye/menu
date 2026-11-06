@@ -38,6 +38,7 @@ import {
   Cake,
 } from 'lucide-react';
 import { getAdminAccessToken, getAdminAuth, normalizeAdminRole, signOutAdmin } from '@/lib/admin-auth';
+import { debounce } from '@/lib/utils/common';
 import { supabase } from '@/lib/supabase';
 import { playNotificationSound } from '@/lib/audio';
 import { AdminLanguageProvider, useAdminLanguage } from '@/lib/i18n/AdminLanguageContext';
@@ -265,41 +266,15 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
   useEffect(() => {
     const fetchOrderCounts = async () => {
       try {
-        const res = await fetch('/api/orders', { cache: 'no-store' });
+        const res = await fetch('/api/orders?view=counts', { cache: 'no-store' });
         if (res.ok) {
           const json = await res.json();
-          if (json.success && Array.isArray(json.data)) {
-            const activeOrders = json.data.filter((o: any) =>
-              ['pending', 'confirmed', 'preparing', 'ready', 'served', 'payment_pending'].includes(o.status)
-            );
-
-            const cashierOrders = activeOrders.filter((o: any) =>
-              ['pending', 'confirmed', 'ready', 'payment_pending'].includes(o.status)
-            );
-
-            let foodCount = 0;
-            let drinkCount = 0;
-
-            for (const order of activeOrders) {
-              if (['confirmed', 'preparing', 'pending'].includes(order.status)) {
-                for (const item of (order.items || [])) {
-                  if (['pending', 'confirmed', 'preparing'].includes(item.status)) {
-                    const type = String(item.category_type || '').toLowerCase();
-                    if (type === 'drink' || type === 'drinks') {
-                      drinkCount += item.quantity || 1;
-                    } else {
-                      foodCount += item.quantity || 1;
-                    }
-                  }
-                }
-              }
-            }
-
+          if (json.success && json.data) {
             setCounts((prev) => ({
               ...prev,
-              cashier: cashierOrders.length,
-              kitchen: foodCount,
-              drinksKitchen: drinkCount,
+              cashier: json.data.cashier,
+              kitchen: json.data.kitchen,
+              drinksKitchen: json.data.drinksKitchen,
             }));
           }
         }
@@ -344,20 +319,26 @@ function AdminLayoutInner({ children }: AdminLayoutProps) {
     fetchOrderCounts();
     fetchCakeOrders();
 
+    // One save can fire several events, so combine them into a single reload
+    const refreshOrderCounts = debounce(fetchOrderCounts, 1000);
+
     const channel = supabase
       .channel(`admin-layout-badges-${Date.now()}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, fetchOrderCounts)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, fetchOrderCounts)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, refreshOrderCounts)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, refreshOrderCounts)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'cake_orders' }, fetchCakeOrders)
       .subscribe();
 
     const interval = setInterval(() => {
-      fetchOrderCounts();
-      fetchCakeOrders();
-    }, 45000);
+      if (document.visibilityState === 'visible') {
+        fetchOrderCounts();
+        fetchCakeOrders();
+      }
+    }, 90000);
 
     return () => {
       clearInterval(interval);
+      refreshOrderCounts.cancel();
       supabase.removeChannel(channel);
     };
   }, []);
